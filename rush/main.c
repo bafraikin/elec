@@ -15,19 +15,19 @@
 
 
 enum ENUM_GAME_STATE {
-	WAITING_FOR_ROLE,
-	CONFIRM_ROLE,
-	START_GAME,
-	BLINKING_LED,
-	WAITING_INPUT,
-	WHO_WON
+	WAITING_FOR_ROLE = 1,
+	CONFIRM_ROLE = 2,
+	START_GAME = 3,
+	BLINKING_LED = 4,
+	WAITING_INPUT = 5,
+	WHO_WON = 6 
 };
 
-enum ENUM_GAME_STATE game_state = WAITING_FOR_ROLE;
+volatile enum ENUM_GAME_STATE game_state = WAITING_FOR_ROLE;
 
 char g_my_time = 0;
 char g_master = 0;
-uint16_t opponent_time = 0;
+char g_time_adverse = 0;
 
 void uart_init(unsigned int ubrr)
 {
@@ -40,15 +40,6 @@ void uart_init(unsigned int ubrr)
 	UCSR0C = (1<<USBS0)| (3<<UCSZ00) | (1 << UCSZ01) | (3 << UPM00);
 }
 
-void wait(uint32_t mhz)
-{
-	while(--mhz)
-		;
-}
-
-void	get_my_time() {
-	g_my_time = (TCNT1 % 255);
-}
 
 /* putchar*/
 void uart_tx(unsigned char data)
@@ -79,49 +70,27 @@ char uart_rx(void)
 	return UDR0;
 }
 
+void	get_my_time() {
+	g_my_time = TCNT1 % 127;
+}
+
+
+void wait(uint32_t mhz)
+{
+	while(--mhz)
+		;
+}
+
+void send_my_time() {
+	uart_tx(g_my_time);
+}
+
+
 void check_master() {
-	PORTB=0b1000;
 	wait(22222);
 	uart_tx(g_master);
 }
 
-
-ISR(USART_RX_vect) // should be TX instead of RX
-{
-	char char_received = uart_rx();
-	//	uart_tx(uart_rx());
-
-	if (game_state == WAITING_FOR_ROLE)
-	{
-		/* handshake*/
-		// stop sending number temporaly
-		if (g_my_time == char_received)
-		{
-			while(1)
-				PORTB=15;
-			get_my_time();
-		}
-		else
-		{
-			g_master = g_my_time > char_received;
-			game_state++;
-			check_master();
-		}
-		// send passe code
-		// if pass code good next game state
-		// otherwise restart sending 
-	}
-	else if (game_state == CONFIRM_ROLE)
-	{
-		char opponent_role = char_received;
-
-		if ( g_master != opponent_role && (opponent_role == 0 || opponent_role ==  1))
-			game_state++;
-		else
-			game_state--;
-	}
-
-}
 
 /*
  *   sei() is not activated in this function.
@@ -133,45 +102,88 @@ void set_interrupt_USART_RX()
 }
 
 
-void init_timer1_interrupt(unsigned int int_time){
+void init_timer1_interrupt(unsigned int int_time) 
+{
 
 	TCCR1B |= (1 << WGM13) | (1 << WGM12); // mode CTC 12 TOP=ICR1
 	TCCR1B |= (1 << CS12) | (1 << CS10); // 1024 (From prescaler)
 
-	TIMSK1 = (1 << OCIE1A); // Timer/Counter1, Output Compare A Match Interrupt Enable
+	//	TIMSK1 = (1 << ICIE1); // Timer/Counter1, Output Compare A Match Interrupt Enable
 
 	ICR1 = int_time;
 	/* Interrupt every minute*/
 
 }
 
-void who_s_the_master() {
-
-	while(game_state == WAITING_FOR_ROLE)
+void who_s_the_master() 
+{
+	if(game_state == WAITING_FOR_ROLE)
 	{
-		uart_tx(g_my_time);
+		get_my_time();
+		wait(40000);
+		send_my_time();
 	}
 }
 
 
 void start_game() {
 	if (game_state == START_GAME)
-		PORTB = g_master;
+	{
+		DDRB=15;
+		PORTB = 0b1111;
+	}
 }
+
+ISR(USART_RX_vect) // should be TX instead of RX
+{
+	char char_received = uart_rx();
+
+	if (game_state == WAITING_FOR_ROLE)
+	{
+		if (g_my_time == char_received)
+		{
+			wait(200);
+			get_my_time();
+			send_my_time();
+		}
+		else
+		{
+			g_master = g_my_time > char_received;
+			game_state = CONFIRM_ROLE;
+			PORTB = game_state;
+			check_master();
+		} 
+	} 
+	else if (game_state == CONFIRM_ROLE)
+	{
+		char opponent_role = char_received;
+		if ( g_master != opponent_role && (opponent_role == 0 || opponent_role == 1))
+		{
+			game_state= START_GAME;
+			while(1)
+				PORTB=g_master;
+		}
+		else
+			game_state--;
+	}
+
+}
+
 
 
 void main(void)
 {
+	DDRB=0;
 	uart_init(MYUBRR);
 	init_timer1_interrupt(8449);
-	wait(200);
-	get_my_time();
+
 	set_interrupt_USART_RX();
 	sei();
-
+	PORTB = game_state;	
 
 	for (;;)
 	{
+		wait(4000);
 		who_s_the_master();
 		start_game();
 	}
